@@ -24,9 +24,8 @@ import fr.acinq.bitcoin.{Btc, ByteVector32, Crypto, MilliBtc, Protocol, Satoshi,
 import fr.acinq.eclair.channel.Helpers.Funding
 import fr.acinq.eclair.transactions.Scripts.{htlcOffered, htlcReceived, toLocalDelayed}
 import fr.acinq.eclair.transactions.Transactions.{addSigs, _}
-import fr.acinq.eclair.wire.{OnionRoutingPacket, UpdateAddHtlc}
+import fr.acinq.eclair.wire.UpdateAddHtlc
 import fr.acinq.eclair.{MilliSatoshi, randomBytes32, _}
-import fr.acinq.eclair._
 import grizzled.slf4j.Logging
 import org.scalatest.FunSuite
 import scodec.bits._
@@ -302,7 +301,7 @@ class TransactionsSpec extends FunSuite with Logging {
       // remote spends offered HTLC output with revocation key
       val script = Script.write(Scripts.htlcOffered(localHtlcPriv.publicKey, remoteHtlcPriv.publicKey, localRevocationPriv.publicKey, Crypto.ripemd160(htlc1.paymentHash)))
       val Some(htlcOutputIndex) = outputs.zipWithIndex.find {
-        case (CommitmentOutputLink(_, _, DirectedHtlc(_, someHtlc)), _) => someHtlc.id == htlc1.id
+        case (CommitmentOutputLink(_, _, CommitmentOutput.Htlc(DirectedHtlc(_, someHtlc))), _) => someHtlc.id == htlc1.id
         case _ => false
       }.map(_._2)
       val htlcPenaltyTx = makeHtlcPenaltyTx(commitTx.tx, htlcOutputIndex, script, localDustLimit, finalPubKeyScript, feeratePerKw)
@@ -315,7 +314,7 @@ class TransactionsSpec extends FunSuite with Logging {
       // remote spends received HTLC output with revocation key
       val script = Script.write(Scripts.htlcReceived(localHtlcPriv.publicKey, remoteHtlcPriv.publicKey, localRevocationPriv.publicKey, Crypto.ripemd160(htlc2.paymentHash), htlc2.cltvExpiry))
       val Some(htlcOutputIndex) = outputs.zipWithIndex.find {
-        case (CommitmentOutputLink(_, _, DirectedHtlc(_, someHtlc)), _) => someHtlc.id == htlc2.id
+        case (CommitmentOutputLink(_, _, CommitmentOutput.Htlc(DirectedHtlc(_, someHtlc))), _) => someHtlc.id == htlc2.id
         case _ => false
       }.map(_._2)
       val htlcPenaltyTx = makeHtlcPenaltyTx(commitTx.tx, htlcOutputIndex, script, localDustLimit, finalPubKeyScript, feeratePerKw)
@@ -380,10 +379,10 @@ class TransactionsSpec extends FunSuite with Logging {
     }
 
     assert(htlcOut2.publicKeyScript.toHex < htlcOut3.publicKeyScript.toHex)
-    assert(outputs.find(_.specItem == DirectedHtlc(OUT, htlc2)).map(_.output.publicKeyScript).contains(htlcOut2.publicKeyScript))
-    assert(outputs.find(_.specItem == DirectedHtlc(OUT, htlc3)).map(_.output.publicKeyScript).contains(htlcOut3.publicKeyScript))
-    assert(outputs.find(_.specItem == DirectedHtlc(OUT, htlc4)).map(_.output.publicKeyScript).contains(htlcOut4.publicKeyScript))
-    assert(outputs.find(_.specItem == DirectedHtlc(OUT, htlc5)).map(_.output.publicKeyScript).contains(htlcOut5.publicKeyScript))
+    assert(outputs.find(_.commitmentOutput == CommitmentOutput.Htlc(DirectedHtlc(OUT, htlc2))).map(_.output.publicKeyScript).contains(htlcOut2.publicKeyScript))
+    assert(outputs.find(_.commitmentOutput == CommitmentOutput.Htlc(DirectedHtlc(OUT, htlc3))).map(_.output.publicKeyScript).contains(htlcOut3.publicKeyScript))
+    assert(outputs.find(_.commitmentOutput == CommitmentOutput.Htlc(DirectedHtlc(OUT, htlc4))).map(_.output.publicKeyScript).contains(htlcOut4.publicKeyScript))
+    assert(outputs.find(_.commitmentOutput == CommitmentOutput.Htlc(DirectedHtlc(OUT, htlc5))).map(_.output.publicKeyScript).contains(htlcOut5.publicKeyScript))
   }
 
   def checkSuccessOrFailTest[T](input: Try[T]) = input match {

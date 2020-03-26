@@ -33,8 +33,9 @@ sealed trait CommitmentOutput
 object CommitmentOutput {
   case object ToLocal extends CommitmentOutput
   case object ToRemote extends CommitmentOutput
+  case class Htlc(directedHtlc: DirectedHtlc) extends CommitmentOutput
 }
-case class DirectedHtlc(direction: Direction, add: UpdateAddHtlc) extends CommitmentOutput
+case class DirectedHtlc(direction: Direction, add: UpdateAddHtlc)
 
 final case class CommitmentSpec(htlcs: Set[DirectedHtlc], feeratePerKw: Long, toLocal: MilliSatoshi, toRemote: MilliSatoshi) {
 
