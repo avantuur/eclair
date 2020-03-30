@@ -320,24 +320,23 @@ object PostRestartHtlcCleaner {
       .flatMap(c => {
         // Filter out HTLCs that will never reach the blockchain or have already been timed-out on-chain.
         val htlcsToIgnore: Set[Long] = c match {
-          case c: DATA_CLOSING =>
-            val irrevocablySpentTxes = Closing.irrevocablySpentTxes(c)
-            val localCommitConfirmed = c.localCommitPublished.exists(x => irrevocablySpentTxes.exists(tx => tx.txid == x.commitTx.txid))
-            val remoteCommitConfirmed = c.remoteCommitPublished.exists(x => irrevocablySpentTxes.exists(tx => tx.txid == x.commitTx.txid))
-            val nextRemoteCommitConfirmed = c.nextRemoteCommitPublished.exists(x => irrevocablySpentTxes.exists(tx => tx.txid == x.commitTx.txid))
-            val timedOutHtlcs = irrevocablySpentTxes.flatMap(tx => {
-              if (localCommitConfirmed) {
-                Closing.timedoutHtlcs(c.commitments.localCommit, c.commitments.localParams.dustLimit, tx, c.localCommitPublished)
-              } else if (remoteCommitConfirmed) {
-                Closing.timedoutHtlcs(c.commitments.remoteCommit, c.commitments.remoteParams.dustLimit, tx, c.remoteCommitPublished)
-              } else if (nextRemoteCommitConfirmed) {
-                c.commitments.remoteNextCommitInfo.left.toSeq.flatMap(r => Closing.timedoutHtlcs(r.nextRemoteCommit, c.commitments.remoteParams.dustLimit, tx, c.nextRemoteCommitPublished))
-              } else {
+          case d: DATA_CLOSING =>
+            (Helpers.Closing.isClosingTypeAlreadyKnown(d) match {
+              case Some(c: Closing.LocalClose) =>
+                c.localCommitPublished.htlcTimeoutTxs
+                  .flatMap(Closing.timedoutHtlcs(c.localCommit, d.commitments.localParams.dustLimit, _, c.localCommitPublished)) ++
+                  Closing.overriddenOutgoingHtlcs(d, c.localCommitPublished.commitTx)
+              case Some(c: Closing.CurrentRemoteClose) =>
+                c.remoteCommitPublished.claimHtlcTimeoutTxs
+                  .flatMap(Closing.timedoutHtlcs(c.remoteCommit, d.commitments.remoteParams.dustLimit, _, c.remoteCommitPublished)) ++
+                  Closing.overriddenOutgoingHtlcs(d, c.remoteCommitPublished.commitTx)
+              case Some(c: Closing.NextRemoteClose) =>
+                c.remoteCommitPublished.claimHtlcTimeoutTxs
+                  .flatMap(Closing.timedoutHtlcs(c.remoteCommit, d.commitments.remoteParams.dustLimit, _, c.remoteCommitPublished)) ++
+                  Closing.overriddenOutgoingHtlcs(d, c.remoteCommitPublished.commitTx)
+              case _ =>
                 Set.empty[UpdateAddHtlc]
-              }
-            }).map(_.id)
-            val overriddenHtlcs = irrevocablySpentTxes.flatMap(tx => Closing.overriddenOutgoingHtlcs(c, tx)).map(_.id)
-            timedOutHtlcs ++ overriddenHtlcs
+            }).map(_.id).toSet
           case _ => Set.empty
         }
         c.commitments.originChannels.filterKeys(htlcId => !htlcsToIgnore.contains(htlcId)).map { case (outgoingHtlcId, origin) => (origin, c.channelId, outgoingHtlcId) }

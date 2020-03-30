@@ -24,6 +24,7 @@ import fr.acinq.bitcoin.{ByteVector32, OutPoint, Satoshi, Script, ScriptFlags, T
 import fr.acinq.eclair.Logs.LogCategory
 import fr.acinq.eclair._
 import fr.acinq.eclair.blockchain._
+import fr.acinq.eclair.channel.Helpers.Closing.{CurrentRemoteClose, LocalClose, NextRemoteClose, RemoteClose}
 import fr.acinq.eclair.channel.Helpers.{Closing, Funding}
 import fr.acinq.eclair.channel.Monitoring.{Metrics, Tags}
 import fr.acinq.eclair.crypto.ShaChain
@@ -216,16 +217,12 @@ class Channel(val nodeParams: NodeParams, val wallet: EclairWallet, remoteNodeId
           //   already reached mindepth
           // - there is no need to attempt to publish transactions for other type of closes
           closingType_opt match {
-            case Some(Closing.LocalClose) =>
-              closing.localCommitPublished.foreach(doPublish)
-            case Some(Closing.CurrentRemoteClose) =>
-              closing.remoteCommitPublished.foreach(doPublish)
-            case Some(Closing.NextRemoteClose) =>
-              closing.nextRemoteCommitPublished.foreach(doPublish)
-            case Some(Closing.RecoveryClose) =>
-              closing.futureRemoteCommitPublished.foreach(doPublish)
-            case Some(Closing.RevokedClose) =>
-              closing.revokedCommitPublished.foreach(doPublish)
+            case Some(c: Closing.LocalClose) =>
+              doPublish(c.localCommitPublished)
+            case Some(c: Closing.RemoteClose) =>
+              doPublish(c.remoteCommitPublished)
+            case Some(c: Closing.RevokedClose) =>
+              doPublish(c.revokedCommitPublished)
             case _ =>
               // in all other cases we need to be ready for any type of closing
               // TODO: should we wait for an acknowledgment from the watcher?
@@ -1302,25 +1299,24 @@ class Channel(val nodeParams: NodeParams, val wallet: EclairWallet, remoteNodeId
 
     case Event(WatchEventConfirmed(BITCOIN_TX_CONFIRMED(tx), blockHeight, _, _), d: DATA_CLOSING) =>
       log.info(s"txid=${tx.txid} has reached mindepth, updating closing state")
-      // first we check if this tx belongs to one of the current local/remote commits and update it
-      val localCommitPublished1 = d.localCommitPublished.map(Closing.updateLocalCommitPublished(_, tx))
-      val remoteCommitPublished1 = d.remoteCommitPublished.map(Closing.updateRemoteCommitPublished(_, tx))
-      val nextRemoteCommitPublished1 = d.nextRemoteCommitPublished.map(Closing.updateRemoteCommitPublished(_, tx))
-      val futureRemoteCommitPublished1 = d.futureRemoteCommitPublished.map(Closing.updateRemoteCommitPublished(_, tx))
-      val revokedCommitPublished1 = d.revokedCommitPublished.map(Closing.updateRevokedCommitPublished(_, tx))
+      // first we check if this tx belongs to one of the current local/remote commits and update it and we update the channel data
+      val d1 = d.copy(
+        localCommitPublished = d.localCommitPublished.map(Closing.updateLocalCommitPublished(_, tx)),
+        remoteCommitPublished = d.remoteCommitPublished.map(Closing.updateRemoteCommitPublished(_, tx)),
+        nextRemoteCommitPublished = d.nextRemoteCommitPublished.map(Closing.updateRemoteCommitPublished(_, tx)),
+        futureRemoteCommitPublished = d.futureRemoteCommitPublished.map(Closing.updateRemoteCommitPublished(_, tx)),
+        revokedCommitPublished = d.revokedCommitPublished.map(Closing.updateRevokedCommitPublished(_, tx))
+      )
       // if the local commitment tx just got confirmed, let's send an event telling when we will get the main output refund
-      if (localCommitPublished1.map(_.commitTx.txid).contains(tx.txid)) {
+      if (d.localCommitPublished.map(_.commitTx.txid).contains(tx.txid)) {
         context.system.eventStream.publish(LocalCommitConfirmed(self, remoteNodeId, d.channelId, blockHeight + d.commitments.remoteParams.toSelfDelay.toInt))
       }
       // we may need to fail some htlcs in case a commitment tx was published and they have reached the timeout threshold
-      val timedoutHtlcs = if (localCommitPublished1 != d.localCommitPublished) {
-        Closing.timedoutHtlcs(d.commitments.localCommit, d.commitments.localParams.dustLimit, tx, localCommitPublished1)
-      } else if (remoteCommitPublished1 != d.remoteCommitPublished) {
-        Closing.timedoutHtlcs(d.commitments.remoteCommit, d.commitments.remoteParams.dustLimit, tx, remoteCommitPublished1)
-      } else if (nextRemoteCommitPublished1 != d.nextRemoteCommitPublished) {
-        Closing.timedoutHtlcs(d.commitments.remoteNextCommitInfo.left.get.nextRemoteCommit, d.commitments.remoteParams.dustLimit, tx, nextRemoteCommitPublished1)
-      } else {
-        Set.empty[UpdateAddHtlc] // we lose htlc outputs in dataloss protection scenarii (future remote commit)
+      val timedoutHtlcs = Closing.isClosingTypeAlreadyKnown(d1) match {
+        case Some(c: LocalClose) => Closing.timedoutHtlcs(d.commitments.localCommit, d.commitments.localParams.dustLimit, tx, c.localCommitPublished)
+        case Some(c: CurrentRemoteClose) => Closing.timedoutHtlcs(c.remoteCommit, d.commitments.remoteParams.dustLimit, tx, c.remoteCommitPublished)
+        case Some(c: NextRemoteClose) => Closing.timedoutHtlcs(c.remoteCommit, d.commitments.remoteParams.dustLimit, tx, c.remoteCommitPublished)
+        case _ => Set.empty[UpdateAddHtlc] // we lose htlc outputs in dataloss protection scenarii (future remote commit)
       }
       timedoutHtlcs.foreach { add =>
         d.commitments.originChannels.get(add.id) match {
@@ -1348,8 +1344,6 @@ class Channel(val nodeParams: NodeParams, val wallet: EclairWallet, remoteNodeId
         .onchainOutgoingHtlcs(d.commitments.localCommit, d.commitments.remoteCommit, d.commitments.remoteNextCommitInfo.left.toOption.map(_.nextRemoteCommit), tx)
         .map(add => (add, d.commitments.originChannels.get(add.id).collect { case Origin.Local(id, _) => id })) // we resolve the payment id if this was a local payment
         .collect { case (add, Some(id)) => context.system.eventStream.publish(PaymentSettlingOnChain(id, amount = add.amountMsat, add.paymentHash)) }
-      // we update the channel data
-      val d1 = d.copy(localCommitPublished = localCommitPublished1, remoteCommitPublished = remoteCommitPublished1, nextRemoteCommitPublished = nextRemoteCommitPublished1, futureRemoteCommitPublished = futureRemoteCommitPublished1, revokedCommitPublished = revokedCommitPublished1)
       // and we also send events related to fee
       Closing.networkFeePaid(tx, d1) foreach { case (fee, desc) => feePaid(fee, tx, desc, d.channelId) }
       // then let's see if any of the possible close scenarii can be considered done
