@@ -48,19 +48,19 @@ class PaymentInitiator(nodeParams: NodeParams, router: ActorRef, relayer: ActorR
       sender ! paymentId
       val paymentCfg = SendPaymentConfig(paymentId, paymentId, r.externalId, r.paymentHash, r.recipientAmount, r.recipientNodeId, Upstream.Local(paymentId), r.paymentRequest, storeInDb = true, publishEvent = true, Nil)
       val finalExpiry = r.finalExpiry(nodeParams.currentBlockHeight)
-      val paymentSecret = r.paymentRequest.flatMap(_.paymentSecret)
       r.paymentRequest match {
         case Some(invoice) if !invoice.features.supported =>
           sender ! PaymentFailed(paymentId, r.paymentHash, LocalFailure(UnsupportedFeatures(invoice.features.bitmask)) :: Nil)
         case Some(invoice) if invoice.features.allowMultiPart && Features.hasFeature(nodeParams.features, Features.BasicMultiPartPayment) =>
           invoice.paymentSecret match {
             case Some(paymentSecret) =>
-              spawnMultiPartPaymentFsm(paymentCfg) forward SendMultiPartPayment(paymentSecret, r.recipientNodeId, r.recipientAmount, finalExpiry, r.maxAttempts, r.assistedRoutes, r.routeParams)
+              spawnMultiPartPaymentFsm(paymentCfg) forward SendMultiPartPayment(paymentSecret, r.recipientNodeId, r.recipientAmount, finalExpiry, r.maxAttempts, r.assistedRoutes, r.routeParams, userCustomTlvs = r.userCustomTlvs)
             case None =>
               sender ! PaymentFailed(paymentId, r.paymentHash, LocalFailure(PaymentSecretMissing) :: Nil)
           }
         case _ =>
-          val finalPayload = Onion.createSinglePartPayload(r.recipientAmount, finalExpiry, paymentSecret, r.userCustomRecords)
+          val paymentSecret = r.paymentRequest.flatMap(_.paymentSecret)
+          val finalPayload = Onion.createSinglePartPayload(r.recipientAmount, finalExpiry, paymentSecret, r.userCustomTlvs)
           spawnPaymentFsm(paymentCfg) forward SendPayment(r.recipientNodeId, finalPayload, r.maxAttempts, r.assistedRoutes, r.routeParams)
       }
 
@@ -193,16 +193,16 @@ object PaymentInitiator {
   }
 
   /**
-   * @param recipientAmount   amount that should be received by the final recipient (usually from a Bolt 11 invoice).
-   * @param paymentHash       payment hash.
-   * @param recipientNodeId   id of the final recipient.
-   * @param maxAttempts       maximum number of retries.
-   * @param finalExpiryDelta  expiry delta for the final recipient.
-   * @param paymentRequest    (optional) Bolt 11 invoice.
-   * @param externalId        (optional) externally-controlled identifier (to reconcile between application DB and eclair DB).
-   * @param assistedRoutes    (optional) routing hints (usually from a Bolt 11 invoice).
-   * @param routeParams       (optional) parameters to fine-tune the routing algorithm.
-   * @param userCustomRecords (optional) extra records to be added to the final payload
+   * @param recipientAmount  amount that should be received by the final recipient (usually from a Bolt 11 invoice).
+   * @param paymentHash      payment hash.
+   * @param recipientNodeId  id of the final recipient.
+   * @param maxAttempts      maximum number of retries.
+   * @param finalExpiryDelta expiry delta for the final recipient.
+   * @param paymentRequest   (optional) Bolt 11 invoice.
+   * @param externalId       (optional) externally-controlled identifier (to reconcile between application DB and eclair DB).
+   * @param assistedRoutes   (optional) routing hints (usually from a Bolt 11 invoice).
+   * @param routeParams      (optional) parameters to fine-tune the routing algorithm.
+   * @param userCustomTlvs   (optional) user-defined custom tlvs that will be added to the onion sent to the target node.
    */
   case class SendPaymentRequest(recipientAmount: MilliSatoshi,
                                 paymentHash: ByteVector32,
@@ -213,7 +213,7 @@ object PaymentInitiator {
                                 externalId: Option[String] = None,
                                 assistedRoutes: Seq[Seq[ExtraHop]] = Nil,
                                 routeParams: Option[RouteParams] = None,
-                                userCustomRecords: Seq[GenericTlv] = Seq.empty) {
+                                userCustomTlvs: Seq[GenericTlv] = Nil) {
     // We add one block in order to not have our htlcs fail when a new block has just been found.
     def finalExpiry(currentBlockHeight: Long) = finalExpiryDelta.toCltvExpiry(currentBlockHeight + 1)
   }
