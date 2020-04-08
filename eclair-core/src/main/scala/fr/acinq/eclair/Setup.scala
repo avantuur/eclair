@@ -42,7 +42,7 @@ import fr.acinq.eclair.blockchain.{EclairWallet, _}
 import fr.acinq.eclair.channel.Register
 import fr.acinq.eclair.crypto.LocalKeyManager
 import fr.acinq.eclair.db.psql.PsqlUtils.LockType
-import fr.acinq.eclair.db.{BackupHandler, Databases}
+import fr.acinq.eclair.db.{BackupHandler, CanBackup, Databases}
 import fr.acinq.eclair.io.{Server, Switchboard}
 import fr.acinq.eclair.payment.Auditor
 import fr.acinq.eclair.payment.receive.PaymentHandler
@@ -60,14 +60,14 @@ import scala.concurrent._
 import scala.concurrent.duration._
 
 /**
-  * Setup eclair from a data directory.
-  *
-  * Created by PM on 25/01/2016.
-  *
-  * @param datadir          directory where eclair-core will write/read its data.
-  * @param overrideDefaults use this parameter to programmatically override the node configuration .
-  * @param seed_opt         optional seed, if set eclair will use it instead of generating one and won't create a seed.dat file.
-  */
+ * Setup eclair from a data directory.
+ *
+ * Created by PM on 25/01/2016.
+ *
+ * @param datadir          directory where eclair-core will write/read its data.
+ * @param overrideDefaults use this parameter to programmatically override the node configuration .
+ * @param seed_opt         optional seed, if set eclair will use it instead of generating one and won't create a seed.dat file.
+ */
 class Setup(datadir: File,
             overrideDefaults: Config = ConfigFactory.empty(),
             seed_opt: Option[ByteVector] = None,
@@ -96,22 +96,22 @@ class Setup(datadir: File,
   val database = initDatabase(config.getConfig("db"))
 
   /**
-    * This counter holds the current blockchain height.
-    * It is mainly used to calculate htlc expiries.
-    * The value is read by all actors, hence it needs to be thread-safe.
-    */
+   * This counter holds the current blockchain height.
+   * It is mainly used to calculate htlc expiries.
+   * The value is read by all actors, hence it needs to be thread-safe.
+   */
   val blockCount = new AtomicLong(0)
 
   /**
-    * This holds the current feerates, in satoshi-per-kilobytes.
-    * The value is read by all actors, hence it needs to be thread-safe.
-    */
+   * This holds the current feerates, in satoshi-per-kilobytes.
+   * The value is read by all actors, hence it needs to be thread-safe.
+   */
   val feeratesPerKB = new AtomicReference[FeeratesPerKB](null)
 
   /**
-    * This holds the current feerates, in satoshi-per-kw.
-    * The value is read by all actors, hence it needs to be thread-safe.
-    */
+   * This holds the current feerates, in satoshi-per-kw.
+   * The value is read by all actors, hence it needs to be thread-safe.
+   */
   val feeratesPerKw = new AtomicReference[FeeratesPerKw](null)
 
   val feeEstimator = new FeeEstimator {
@@ -182,10 +182,10 @@ class Setup(datadir: File,
           val port = config.getInt("electrum.port")
           val address = InetSocketAddress.createUnresolved(host, port)
           val ssl = config.getString("electrum.ssl") match {
-              case _ if address.getHostName.endsWith(".onion") => SSL.OFF // Tor already adds end-to-end encryption, adding TLS on top doesn't add anything
-              case "off" => SSL.OFF
-              case "loose" => SSL.LOOSE
-              case _ => SSL.STRICT // strict mode is the default when we specify a custom electrum server, we don't want to be MITMed
+            case _ if address.getHostName.endsWith(".onion") => SSL.OFF // Tor already adds end-to-end encryption, adding TLS on top doesn't add anything
+            case "off" => SSL.OFF
+            case "loose" => SSL.LOOSE
+            case _ => SSL.STRICT // strict mode is the default when we specify a custom electrum server, we don't want to be MITMed
           }
 
           logger.info(s"override electrum default with server=$address ssl=$ssl")
@@ -274,14 +274,17 @@ class Setup(datadir: File,
       _ = wallet.getFinalAddress.map {
         case address => logger.info(s"initial wallet address=$address")
       }
-      // do not change the name of this actor. it is used in the configuration to specify a custom bounded mailbox
 
-      backupHandler = system.actorOf(SimpleSupervisor.props(
-        BackupHandler.props(
-          nodeParams.db,
-          new File(chaindir, "eclair.sqlite.bak"),
-          if (config.hasPath("backup-notify-script")) Some(config.getString("backup-notify-script")) else None
-        ), "backuphandler", SupervisorStrategy.Resume))
+      // do not change the name of this actor. it is used in the configuration to specify a custom bounded mailbox
+      backupHandler = nodeParams.db match {
+        case canBackup: CanBackup => system.actorOf(SimpleSupervisor.props(
+          BackupHandler.props(
+            canBackup,
+            new File(chaindir, "eclair.sqlite.bak"),
+            if (config.hasPath("backup-notify-script")) Some(config.getString("backup-notify-script")) else None
+          ), "backuphandler", SupervisorStrategy.Resume))
+        case _ => system.deadLetters
+      }
       audit = system.actorOf(SimpleSupervisor.props(Auditor.props(nodeParams), "auditor", SupervisorStrategy.Resume))
       register = system.actorOf(SimpleSupervisor.props(Props(new Register), "register", SupervisorStrategy.Resume))
       commandBuffer = system.actorOf(SimpleSupervisor.props(Props(new CommandBuffer(nodeParams, register)), "command-buffer", SupervisorStrategy.Resume))
@@ -372,7 +375,7 @@ class Setup(datadir: File,
                 throw new RuntimeException("Invalid configuration: `db.psql.ownership-lease.lease-interval` must be greater than `db.psql.ownership-lease.lease-renew-interval`")
               system.scheduler.schedule(dbLockLeaseRenewInterval, dbLockLeaseRenewInterval) {
                 try {
-                  database.obtainExclusiveLock()
+                  psql.obtainExclusiveLock()
                 } catch {
                   case e: Throwable =>
                     logger.error("fatal error: Cannot obtain ownership on the database.\n", e)
